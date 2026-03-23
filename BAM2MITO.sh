@@ -111,6 +111,10 @@ samtools fastq -@ 8 \
 echo "R1 reads:"        $(( $(gzip -cd "${PREFIX}.mt_any_R1.fastq.gz"        | wc -l) / 4 ))
 echo "R2 reads:"        $(( $(gzip -cd "${PREFIX}.mt_any_R2.fastq.gz"        | wc -l) / 4 ))
 echo "Singleton reads:" $(( $(gzip -cd "${PREFIX}.mt_any_singletons.fastq.gz" | wc -l) / 4 ))
+# List files with human-readable sizes (-h) to verify they were written correctly.
+# Note: singletons are retained here for record-keeping but are NOT passed to
+# BWA-MEM in Step 8. Only the properly paired R1/R2 files are re-aligned,
+# because BWA-MEM paired-end mode expects matched read pairs.
 ls -lh "${PREFIX}.mt_any_R"*.fastq.gz "${PREFIX}.mt_any_singletons.fastq.gz"
 
 # =============================================================================

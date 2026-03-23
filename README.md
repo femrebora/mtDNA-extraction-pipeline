@@ -33,6 +33,12 @@ The file `sequence.fasta` contains the **revised Cambridge Reference Sequence (r
 
 ---
 
+## Input Requirements
+
+The input BAM (`{PREFIX}.recal.bam`) must be a **base-quality score recalibrated (BQSR)** alignment file. BQSR is a GATK pre-processing step that corrects systematic errors in base quality scores reported by the sequencer, improving the accuracy of downstream variant calling. It is typically produced as the final step of the GATK Best Practices pre-processing workflow (MarkDuplicates → BQSR).
+
+---
+
 ## Usage
 
 1. Place your recalibrated BAM file in the same directory as the script.
@@ -48,34 +54,39 @@ bash BAM2MITO.sh
 ## Pipeline Steps
 
 ```
-Input BAM (whole-genome/exome)
+Input BAM (whole-genome/exome, BQSR recalibrated)
         │
         ▼
-[1] Index BAM → samtools index
+[Step 1]  Index BAM → samtools index
         │
         ▼
-[2] Extract chrM read names → samtools view | awk | sort -u
+[Step 2]  Extract chrM read names → samtools view | awk | sort -u
         │
         ▼
-[3] Pull both mates of each pair → samtools view -N
+[Step 3]  Pull both mates of each pair → samtools view -N
         │
         ▼
-[4] Name-sort for FASTQ conversion → samtools sort -n
+[Step 4]  Name-sort for FASTQ conversion → samtools sort -n
         │
         ▼
-[5] Convert to paired FASTQ → samtools fastq
+[Step 5]  Convert to paired FASTQ → samtools fastq
+          (R1, R2, and singletons produced)
         │
         ▼
-[6] Index rCRS reference → samtools faidx + bwa index
+[Step 6]  QC: print read counts + file sizes
+          (singletons kept for records but NOT re-aligned)
         │
         ▼
-[7] Re-align to rCRS → bwa mem | samtools sort
+[Step 7]  Index rCRS reference → samtools faidx + bwa index
         │
         ▼
-[8] Call variants → bcftools mpileup | call | norm
+[Step 8]  Re-align paired reads (R1 + R2 only) to rCRS → bwa mem | samtools sort
         │
         ▼
-[9] Build consensus FASTA → bcftools consensus
+[Step 9]  Call variants → bcftools mpileup | call | norm → compressed VCF
+        │
+        ▼
+[Step 10] Build consensus FASTA → bcftools consensus + rename header
         │
         ▼
 Output: {PREFIX}.mt.consensus.fasta  ← upload to MITOMASTER
