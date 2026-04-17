@@ -196,43 +196,7 @@ fi
 #
 # Aligning paired and singleton reads in separate BWA-MEM calls is necessary
 # because BWA-MEM paired-end mode expects matched R1/R2 pairs; mixing
-# unpaired reads into a paired-end run would corru#!/usr/bin/env bash
-# =============================================================================
-# BAM2MITO.sh
-# =============================================================================
-# Extracts mitochondrial DNA reads from a recalibrated whole-genome or
-# whole-exome BAM file, re-aligns them to the revised Cambridge Reference
-# Sequence (rCRS, NC_012920.1), calls variants, and generates a consensus
-# FASTA ready for upload to MITOMASTER (https://www.mitomap.org).
-#
-# Usage:
-#   bash BAM2MITO.sh
-#
-# Dependencies (minimum versions):
-#   samtools >= 1.12, bwa, bcftools
-#
-# Known limitations:
-#   1. bcftools --ploidy 1 detects homoplasmic variants only. For low-level
-#      heteroplasmy, use: gatk Mutect2 --mitochondria-mode
-#   2. NuMT (nuclear mitochondrial segment) reads are not filtered. For
-#      stricter analyses, re-align to a combined nuclear+rCRS reference and
-#      retain only reads whose best alignment maps to the mt contig.
-# =============================================================================
-
-# Exit immediately if any command fails, treat unset variables as errors,
-# and propagate errors through pipes (prevents silent failures).
-set -euo pipefail
-
-# =============================================================================
-# CONFIGURATION
-# =============================================================================
-
-# Sample identifier — used as a prefix for every output file.
-PREFIX="your_bam_file_prefix"
-
-# Input BAM file: base-quality score recalibrated alignment (from GATK BQSR
-# or equivalent) covering the full genome or exome including chrM.
-pt mate information.
+# unpaired reads into a paired-end run would corrupt mate information.
 #
 # A read-group header (-R) is mandatory for downstream tools (GATK, bcftools)
 # to correctly identify samples and libraries.
@@ -318,13 +282,15 @@ samtools coverage  "${PREFIX}.mt.bam"
 #                                   high-coverage mtDNA positions are silently
 #                                   truncated and variants are missed.
 #
-#              --excl-flags       : DUP is deliberately excluded from the
-#                                   default exclusion list. For high-copy
-#                                   mitochondrial DNA, excluding duplicate-
-#                                   flagged reads can severely reduce effective
-#                                   depth and distort allele frequencies.
-#                                   Unmapped, secondary, and QC-failed reads
-#                                   are still excluded.
+#              --ns               : Skip reads with any of these flags set.
+#                                   DUP is deliberately excluded from this
+#                                   list. For high-copy mitochondrial DNA,
+#                                   excluding duplicate-flagged reads can
+#                                   severely reduce effective depth and distort
+#                                   allele frequencies. Unmapped, secondary,
+#                                   and QC-failed reads are still excluded.
+#                                   (bcftools 1.19+ uses --ns instead of the
+#                                   older --excl-flags)
 #
 #              -a FORMAT/AD,DP    : emit allele depth (AD) and total depth (DP)
 #                                   per sample; required for the quality filter.
@@ -341,7 +307,7 @@ echo "[8/8] Calling variants..."
 bcftools mpileup \
     -f "$REF" \
     -d "$MAX_DEPTH" \
-    --excl-flags UNMAP,SECONDARY,QCFAIL \
+    --ns UNMAP,SECONDARY,QCFAIL \
     -a FORMAT/AD,FORMAT/DP \
     -Ou \
     "${PREFIX}.mt.bam" \
