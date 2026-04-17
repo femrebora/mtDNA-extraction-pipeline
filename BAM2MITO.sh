@@ -25,6 +25,10 @@
 # and propagate errors through pipes (prevents silent failures).
 set -euo pipefail
 
+# Collect intermediate files; remove them on any exit (success or failure).
+TMPFILES=()
+trap 'rm -f "${TMPFILES[@]}" 2>/dev/null || true' EXIT
+
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
@@ -59,6 +63,11 @@ MAX_DEPTH=500000
 # =============================================================================
 # Fail early with a clear message rather than obscure mid-run errors.
 
+for tool in samtools bwa bcftools; do
+    command -v "$tool" >/dev/null 2>&1 \
+        || { echo "ERROR: $tool not found in PATH" >&2; exit 1; }
+done
+
 # Confirm samtools is at least 1.12; the -N flag (filter by read-name file)
 # used in Step 3 was introduced in that release.
 SAMTOOLS_VER=$(samtools --version | awk 'NR==1 {print $2}')
@@ -69,11 +78,6 @@ if [[ "$SAMTOOLS_MAJOR" -lt 1 ]] || \
     echo "ERROR: samtools >= 1.12 required (found ${SAMTOOLS_VER})" >&2
     exit 1
 fi
-
-for tool in samtools bwa bcftools; do
-    command -v "$tool" >/dev/null 2>&1 \
-        || { echo "ERROR: $tool not found in PATH" >&2; exit 1; }
-done
 
 [[ -f "$BAM" ]] || { echo "ERROR: BAM not found: $BAM" >&2; exit 1; }
 [[ -f "$REF" ]] || { echo "ERROR: Reference not found: $REF" >&2; exit 1; }
@@ -113,8 +117,11 @@ fi
 # both mates for accurate re-alignment.
 
 echo "[2/8] Collecting ${MTCONTIG} read names..."
-samtools view "$BAM" "$MTCONTIG" \
+# -F 2308 excludes UNMAP(4)+SECONDARY(256)+SUPPLEMENTARY(2048) so that
+# only primary alignments seed the read-name list.
+samtools view -F 2308 "$BAM" "$MTCONTIG" \
     | awk '{print $1}' | sort -u > "${PREFIX}.mt.readnames.txt"
+TMPFILES+=("${PREFIX}.mt.readnames.txt")
 echo "      Read names found: $(wc -l < "${PREFIX}.mt.readnames.txt")"
 
 # =============================================================================
@@ -129,6 +136,7 @@ echo "      Read names found: $(wc -l < "${PREFIX}.mt.readnames.txt")"
 
 echo "[3/8] Extracting both mates..."
 samtools view -b -N "${PREFIX}.mt.readnames.txt" "$BAM" > "${PREFIX}.mt.anymate.bam"
+TMPFILES+=("${PREFIX}.mt.anymate.bam")
 
 # =============================================================================
 # STEP 4 — NAME-SORT AND CONVERT TO FASTQ
@@ -147,6 +155,7 @@ samtools view -b -N "${PREFIX}.mt.readnames.txt" "$BAM" > "${PREFIX}.mt.anymate.
 echo "[4/8] Name-sorting and converting to FASTQ..."
 samtools sort -n -@ "$THREADS" \
     -o "${PREFIX}.mt.anymate.namesort.bam" "${PREFIX}.mt.anymate.bam"
+TMPFILES+=("${PREFIX}.mt.anymate.namesort.bam")
 
 samtools fastq -@ "$THREADS" \
     -1 "${PREFIX}.mt_any_R1.fastq.gz" \
@@ -154,6 +163,8 @@ samtools fastq -@ "$THREADS" \
     -s "${PREFIX}.mt_any_singletons.fastq.gz" \
     -0 /dev/null -n \
     "${PREFIX}.mt.anymate.namesort.bam"
+TMPFILES+=("${PREFIX}.mt_any_R1.fastq.gz" "${PREFIX}.mt_any_R2.fastq.gz" \
+           "${PREFIX}.mt_any_singletons.fastq.gz")
 
 # Each FASTQ record spans exactly 4 lines (header, sequence, '+', quality),
 # so dividing the total line count by 4 gives the number of reads.
@@ -172,7 +183,10 @@ ls -lh "${PREFIX}.mt_any_R"*.fastq.gz "${PREFIX}.mt_any_singletons.fastq.gz"
 
 echo "[5/8] Indexing rCRS reference..."
 samtools faidx "$REF"
-[[ -f "${REF}.bwt" ]] || bwa index "$REF"
+if [[ ! -f "${REF}.amb" || ! -f "${REF}.ann" || ! -f "${REF}.bwt" || \
+      ! -f "${REF}.pac" || ! -f "${REF}.sa" ]]; then
+    bwa index "$REF"
+fi
 
 # =============================================================================
 # STEP 6 — RE-ALIGN MITOCHONDRIAL READS TO rCRS
@@ -182,7 +196,43 @@ samtools faidx "$REF"
 #
 # Aligning paired and singleton reads in separate BWA-MEM calls is necessary
 # because BWA-MEM paired-end mode expects matched R1/R2 pairs; mixing
-# unpaired reads into a paired-end run would corrupt mate information.
+# unpaired reads into a paired-end run would corru#!/usr/bin/env bash
+# =============================================================================
+# BAM2MITO.sh
+# =============================================================================
+# Extracts mitochondrial DNA reads from a recalibrated whole-genome or
+# whole-exome BAM file, re-aligns them to the revised Cambridge Reference
+# Sequence (rCRS, NC_012920.1), calls variants, and generates a consensus
+# FASTA ready for upload to MITOMASTER (https://www.mitomap.org).
+#
+# Usage:
+#   bash BAM2MITO.sh
+#
+# Dependencies (minimum versions):
+#   samtools >= 1.12, bwa, bcftools
+#
+# Known limitations:
+#   1. bcftools --ploidy 1 detects homoplasmic variants only. For low-level
+#      heteroplasmy, use: gatk Mutect2 --mitochondria-mode
+#   2. NuMT (nuclear mitochondrial segment) reads are not filtered. For
+#      stricter analyses, re-align to a combined nuclear+rCRS reference and
+#      retain only reads whose best alignment maps to the mt contig.
+# =============================================================================
+
+# Exit immediately if any command fails, treat unset variables as errors,
+# and propagate errors through pipes (prevents silent failures).
+set -euo pipefail
+
+# =============================================================================
+# CONFIGURATION
+# =============================================================================
+
+# Sample identifier — used as a prefix for every output file.
+PREFIX="your_bam_file_prefix"
+
+# Input BAM file: base-quality score recalibrated alignment (from GATK BQSR
+# or equivalent) covering the full genome or exome including chrM.
+pt mate information.
 #
 # A read-group header (-R) is mandatory for downstream tools (GATK, bcftools)
 # to correctly identify samples and libraries.
@@ -309,14 +359,19 @@ bcftools index "${PREFIX}.mt.raw.vcf.gz"
 echo "── Raw variant stats ──"
 bcftools stats "${PREFIX}.mt.raw.vcf.gz" | grep "^SN"
 
-# Quality filter: mark sites that fail QUAL >= 20 or FORMAT/DP >= 10 as
-# LOWQUAL. bcftools consensus skips all non-PASS sites by default, so only
-# high-confidence variants will be applied to the consensus sequence.
+# Quality filter: mark sites that fail QUAL >= 20 or FORMAT/DP >= 100 as
+# LOWQUAL. mtDNA routinely exceeds 1,000× coverage, so DP < 100 signals a
+# genuine mapping or assembly gap rather than normal low-coverage variation.
+# An additional allele-frequency gate (ALT AD / total AD >= 0.95) enforces
+# that only near-homoplasmic variants — not NuMT noise or systematic errors —
+# are applied to the consensus FASTA.
 # The raw VCF is kept alongside the filtered VCF for traceability.
 bcftools filter \
     -s LOWQUAL \
-    -i 'QUAL>=20 && FORMAT/DP>=10' \
+    -i 'QUAL>=20 && FORMAT/DP>=100' \
     "${PREFIX}.mt.raw.vcf.gz" \
+| bcftools view \
+    -i 'FILTER="PASS" && (FORMAT/AD[0:1] / (FORMAT/AD[0:0] + FORMAT/AD[0:1])) >= 0.95' \
     -Oz -o "${PREFIX}.mt.vcf.gz"
 
 bcftools index "${PREFIX}.mt.vcf.gz"
@@ -324,10 +379,8 @@ bcftools index "${PREFIX}.mt.vcf.gz"
 echo "── Filtered variant stats ──"
 bcftools stats "${PREFIX}.mt.vcf.gz" | grep "^SN"
 
-# Apply the filtered variants to the rCRS sequence to produce a
-# sample-specific mitochondrial consensus. The output FASTA header is
-# replaced with the sample identifier so that MITOMASTER correctly labels
-# the uploaded sequence.
+# Apply PASS variants (already the only entries in mt.vcf.gz) to the rCRS
+# sequence to produce a sample-specific mitochondrial consensus.
 bcftools consensus -f "$REF" "${PREFIX}.mt.vcf.gz" > "${PREFIX}.mt.consensus.fasta"
 
 # Replace the default header line (inherited from the reference) with the
