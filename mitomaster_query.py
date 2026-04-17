@@ -3,6 +3,7 @@
 
 import io
 import os
+import time
 
 import pandas as pd
 import requests
@@ -12,19 +13,37 @@ from openpyxl.utils import get_column_letter
 API_URL = "https://www.mitomap.org/mitomaster/websrvc.cgi"
 API_KEY = "1776426752482"
 
-FASTA_FILE = os.path.join(os.path.dirname(__file__), "your_patient.mt.consensus.fasta")
+FASTA_FILE = os.path.join(os.path.dirname(__file__), "ECE26-181-AGH.mt.consensus.fasta")
 
 
-def query_mitomaster(fasta_path: str) -> str:
-    with open(fasta_path, "rb") as f:
-        response = requests.post(
-            API_URL,
-            data={"key": API_KEY, "fileType": "sequences", "output": "detail"},
-            files={"file": (os.path.basename(fasta_path), f, "text/plain")},
-            timeout=120,
-        )
-    response.raise_for_status()
-    return response.text
+def query_mitomaster(fasta_path: str, retries: int = 4) -> str:
+    cache_path = fasta_path.replace(".fasta", ".mitomaster_detail_raw.tsv")
+    if os.path.exists(cache_path):
+        print(f"  Using cached raw response: {os.path.basename(cache_path)}")
+        with open(cache_path) as f:
+            return f.read()
+
+    for attempt in range(1, retries + 1):
+        try:
+            print(f"  API attempt {attempt}/{retries}...")
+            with open(fasta_path, "rb") as f:
+                response = requests.post(
+                    API_URL,
+                    data={"key": API_KEY, "fileType": "sequences", "output": "detail"},
+                    files={"file": (os.path.basename(fasta_path), f, "text/plain")},
+                    timeout=180,
+                )
+            response.raise_for_status()
+            with open(cache_path, "w") as f:
+                f.write(response.text)
+            return response.text
+        except requests.exceptions.HTTPError as e:
+            if attempt < retries:
+                wait = 15 * attempt
+                print(f"  Server error ({e}), retrying in {wait}s...")
+                time.sleep(wait)
+            else:
+                raise
 
 
 def save_excel(df: pd.DataFrame, sample_name: str, out_path: str) -> None:
